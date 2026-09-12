@@ -1,0 +1,53 @@
+name: PakWheels Chunked Scraper
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_page:
+        default: '1'
+      end_page:
+        default: '800'
+      total_pages:
+        default: '3280'
+      chunk_size:
+        default: '800'
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - run: pip install -r requirements.txt
+
+      - name: Run spider for this chunk
+        run: |
+          scrapy crawl pakwheels \
+            -a start_page=${{ inputs.start_page }} \
+            -a end_page=${{ inputs.end_page }} \
+            -o output_${{ inputs.start_page }}_${{ inputs.end_page }}.csv
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pakwheels-chunk-${{ inputs.start_page }}-${{ inputs.end_page }}
+          path: output_*.csv
+
+      - name: Trigger next chunk
+        if: ${{ inputs.end_page < inputs.total_pages }}
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          NEXT_START=$((${{ inputs.end_page }} + 1))
+          NEXT_END=$((NEXT_START + ${{ inputs.chunk_size }} - 1))
+          if [ "$NEXT_END" -gt "${{ inputs.total_pages }}" ]; then
+            NEXT_END=${{ inputs.total_pages }}
+          fi
+          gh workflow run scrape.yml \
+            -f start_page=$NEXT_START \
+            -f end_page=$NEXT_END \
+            -f total_pages=${{ inputs.total_pages }} \
+            -f chunk_size=${{ inputs.chunk_size }}
