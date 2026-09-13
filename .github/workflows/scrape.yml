@@ -6,11 +6,11 @@ on:
       start_page:
         default: '1'
       end_page:
-        default: '800'
+        default: '300'
       total_pages:
         default: '3280'
       chunk_size:
-        default: '800'
+        default: '300'
 
 jobs:
   scrape:
@@ -29,6 +29,7 @@ jobs:
           scrapy crawl pakwheels \
             -a start_page=${{ inputs.start_page }} \
             -a end_page=${{ inputs.end_page }} \
+             -s CLOSESPIDER_TIMEOUT=18000 \
             -o output_${{ inputs.start_page }}_${{ inputs.end_page }}.csv
 
       - uses: actions/upload-artifact@v4
