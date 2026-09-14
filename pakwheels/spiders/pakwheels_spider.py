@@ -1,31 +1,12 @@
 """
 PakWheels Used Cars Spider (v4)
 ---------------------------------
-Updated to match the "Used Car Marketplace Data — Schema & Field Spec"
+Updated to match the "Used Car Marketplace Data - Schema & Field Spec"
 handed down for Phase 0. Builds on v3 (detail-page scraping).
 
-CHANGES FROM v3:
-  - Renamed "name" -> "title" (per schema field #5)
-  - Renamed "description" (feature tags) -> "features" (per schema field #25;
-    the real free-text seller description is now its own field, see below)
-  - Removed "page" from output entirely (schema section 4: dropped field,
-    pagination artifact, not real listing data) — still used internally
-    for logging/pagination logic, just not yielded in the item anymore.
-  - ADDED "platform" -> constant "pakwheels" (schema field #2)
-  - ADDED "scrape_date" -> UTC timestamp at scrape time (schema field #3)
-  - ADDED "listing_city" -> parsed from the URL slug, e.g.
-    ".../for-sale-in-kot-addu-11915093" -> "Kot Addu" (schema field #20).
-    This is a reliable, regex-based parse (no new DOM selector needed),
-    since every PakWheels listing URL follows this exact "for-sale-in-<city>-<id>"
-    pattern.
-  - ADDED "last_updated" -> re-added from the SAME already-verified
-    ul#scroll_car_detail overview list used for registered_in/color/
-    assembly/body_type (schema field #21). We just weren't storing it before.
-
-  *** ALL FIELDS NOW VERIFIED against real page HTML (as of this version),
-  including seller_type, seller_name, seller_verified, and
-  description_text — all confirmed using screenshots of the actual
-  PakWheels detail page DOM. ***
+v4.1 FIX: __init__ now properly accepts and uses start_page/end_page
+so that chunked runs (via GitHub Actions) actually crawl different
+page ranges instead of every chunk restarting from page=1.
 """
 
 import json
@@ -57,15 +38,12 @@ class PakwheelsSpider(scrapy.Spider):
     }
 
     # Matches "...for-sale-in-<city-slug>-<listing-id>" at the end of a URL.
-    # Works for multi-word cities too, e.g. "kot-addu" -> "Kot Addu".
     CITY_RE = re.compile(r"for-sale-in-([a-z0-9-]+)-\d+/?$", re.IGNORECASE)
     ID_RE = re.compile(r"(\d+)/?$")
 
     @staticmethod
     def _to_int(value):
-        """Strip any non-digit characters (units, commas) and cast to int.
-        e.g. "88,000 km" -> 88000, "1500cc" -> 1500. Returns None if the
-        value is missing or has no digits at all."""
+        """Strip any non-digit characters (units, commas) and cast to int."""
         if not value:
             return None
         digits = re.sub(r"[^\d]", "", str(value))
@@ -73,20 +51,7 @@ class PakwheelsSpider(scrapy.Spider):
 
     @staticmethod
     def _split_model_variant(title, make, year, city):
-        """Best-effort split of "model" and "variant" out of the title.
-        e.g. "Toyota Corolla Altis Grande CVT-i 1.8 2018 for sale in
-        Islamabad" -> make="Toyota" (already known) removed, year/city
-        suffix removed -> remaining = "Corolla Altis Grande CVT-i 1.8"
-        -> model="Corolla", variant="Altis Grande CVT-i 1.8".
-
-        CAVEAT: this assumes the model is a single word, which breaks for
-        genuine multi-word models (e.g. "Wagon R", "Land Cruiser", "Grand
-        Cabin") — those will incorrectly get only "Wagon"/"Land"/"Grand"
-        as the model and the rest folded into variant. A proper fix needs
-        a make -> known-model-list lookup table, which is genuinely an
-        ETL-side task (per the schema doc), not something reliably done
-        with string-splitting alone at scrape time.
-        """
+        """Best-effort split of "model" and "variant" out of the title."""
         if not title:
             return None, None
 
@@ -106,23 +71,29 @@ class PakwheelsSpider(scrapy.Spider):
         variant = parts[1].strip() if len(parts) > 1 and parts[1].strip() else None
         return model, variant
 
-    def __init__(self, max_pages=None, *args, **kwargs):
+    def __init__(self, max_pages=None, start_page=1, end_page=None, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.max_pages = int(max_pages) if max_pages else None
+        self.start_page = int(start_page)
+        self.end_page = int(end_page) if end_page else None
         self.seen_urls = set()
+        self.logger.info(
+            f"Spider init: start_page={self.start_page}, "
+            f"end_page={self.end_page}, max_pages={self.max_pages}"
+        )
 
     async def start(self):
         yield scrapy.Request(
-            self.base_url.format(page=1),
+            self.base_url.format(page=self.start_page),
             callback=self.parse,
-            meta={"page": 1},
+            meta={"page": self.start_page},
         )
 
     def start_requests(self):
         yield scrapy.Request(
-            self.base_url.format(page=1),
+            self.base_url.format(page=self.start_page),
             callback=self.parse,
-            meta={"page": 1},
+            meta={"page": self.start_page},
         )
 
     @staticmethod
@@ -177,7 +148,7 @@ class PakwheelsSpider(scrapy.Spider):
             listing_id = id_match.group(1) if id_match else None
 
             raw_mileage = data.get("mileageFromOdometer")
-            raw_engine = engine_cc  # e.g. "1500cc" (text, from JSON-LD)
+            raw_engine = engine_cc
             title = data.get("name")
             year = data.get("modelDate")
             model, variant = self._split_model_variant(title, make_name, year, None)
@@ -199,7 +170,6 @@ class PakwheelsSpider(scrapy.Spider):
                 "transmission": data.get("vehicleTransmission"),
                 "condition": data.get("itemCondition"),
                 "listing_city": self._extract_city(url),
-                # placeholders filled in by parse_detail()
                 "body_type": None,
                 "color": None,
                 "assembly": None,
@@ -228,6 +198,10 @@ class PakwheelsSpider(scrapy.Spider):
             self.logger.info("No new listings found, stopping the crawl.")
             return
 
+        if self.end_page and page >= self.end_page:
+            self.logger.info(f"Reached end_page={self.end_page}, stopping this chunk.")
+            return
+
         if self.max_pages and page >= self.max_pages:
             self.logger.info(f"Reached max_pages={self.max_pages}, stopping.")
             return
@@ -249,10 +223,7 @@ class PakwheelsSpider(scrapy.Spider):
     def parse_detail(self, response):
         item = response.meta["item"]
 
-        # -----------------------------------------------------------
-        # 1) Overview list (VERIFIED selector, same as v3):
-        #    Registered In / Color / Assembly / Body Type / Last Updated
-        # -----------------------------------------------------------
+        # 1) Overview list: Registered In / Color / Assembly / Body Type / Last Updated
         overview = {}
         pending_label = None
         for li in response.css("ul#scroll_car_detail > li"):
@@ -272,12 +243,7 @@ class PakwheelsSpider(scrapy.Spider):
         item["body_type"] = overview.get("body type")
         item["last_updated"] = overview.get("last updated")
 
-        # -----------------------------------------------------------
-        # 2) Feature tags (VERIFIED selector, same as v3) -> "features"
-        #    (renamed from "description" — this is the checklist of
-        #    tags like "Interior: Infotainment System", NOT the seller's
-        #    own written description, which is field #3 below).
-        # -----------------------------------------------------------
+        # 2) Feature tags -> "features"
         feature_parts = []
         for group in response.css("div#featuresAccordion div.accordion-group"):
             heading = group.css("h3.accordion-toggle::text").get()
@@ -290,55 +256,14 @@ class PakwheelsSpider(scrapy.Spider):
 
         item["features"] = json.dumps(feature_parts, ensure_ascii=False)
 
-        # -----------------------------------------------------------
-        # 3) Seller's free-text comments — VERIFIED against real HTML.
-        #    Structure confirmed:
-        #      <h2 id="scroll_seller_comments">Seller's Comments</h2>
-        #      <div>
-        #          "1- 3 lac 27 hazar original mileage"
-        #          <br>
-        #          "2- Color touching few spots..."
-        #          <br>
-        #          ...
-        #      </div>
-        #    The comment div is the very next <div> sibling right after
-        #    the h2#scroll_seller_comments heading. Lines are separated
-        #    by <br> tags, so we grab each text node and join with a
-        #    newline to keep the seller's original numbered-list format
-        #    readable in the CSV cell.
-        # -----------------------------------------------------------
+        # 3) Seller's free-text comments
         comment_lines = response.css(
             "h2#scroll_seller_comments + div ::text"
         ).getall()
         comment_lines = [t.strip() for t in comment_lines if t.strip()]
         item["description_text"] = " | ".join(comment_lines) if comment_lines else None
 
-        # -----------------------------------------------------------
-        # 4) Seller info — handles BOTH layouts PakWheels uses:
-        #
-        #    A) DEALER layout (verified from a real dealer listing):
-        #       <div class="col-md-3" style="font-weight:bold;">Dealer:</div>
-        #       <div class="col-md-9">
-        #         <label itemprop="name">
-        #           <a itemprop="url" href="...">Car Emporium</a>
-        #           <i class="fa fa-check-circle varified-icon"
-        #              title="Verified Dealer"></i>
-        #         </label>
-        #       </div>
-        #       (Note: PakWheels' own class name has a typo —
-        #       "varified-icon", not "verified-icon" — matched as-is.)
-        #
-        #    B) PRIVATE SELLER layout (verified earlier, e.g. "Nadeem"):
-        #       <div class="owner-details ..." itemtype="...AutoDealer">
-        #         <h5 class="nomargin">Nadeem</h5>
-        #       <ul class="user-verification text-center">
-        #         <li class="user-phone"><span class="verified"></span></li>
-        #         <li class="user-email"><span class="verified"></span></li>
-        #       </ul>
-        #
-        #    We try the dealer layout first; if nothing matches, we fall
-        #    back to the private-seller layout.
-        # -----------------------------------------------------------
+        # 4) Seller info - handles BOTH dealer and private-seller layouts
         dealer_name = response.css('label[itemprop="name"] a[itemprop="url"]::text').get()
 
         if dealer_name:
@@ -364,9 +289,7 @@ class PakwheelsSpider(scrapy.Spider):
             )
             item["seller_verified"] = len(verified_badges) > 0
 
-        # -----------------------------------------------------------
-        # 5) Gallery images (VERIFIED selector, same as v3)
-        # -----------------------------------------------------------
+        # 5) Gallery images
         gallery_images = response.css("ul.gallery.light-gallery li::attr(data-src)").getall()
         cover = response.meta.get("cover_photo")
         cover_list = cover if isinstance(cover, list) else ([cover] if cover else [])
