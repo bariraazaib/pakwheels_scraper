@@ -3,12 +3,9 @@ name: PakWheels Chunked Scraper
 on:
   workflow_dispatch:
     inputs:
-      start_page:
-        default: '1'
-      end_page:
-        default: '300'
-      total_pages:
-        default: '3280'
+      reset_start_page:
+        description: 'Chhod do khali (auto-resume), ya specific page number do (force restart)'
+        default: ''
       chunk_size:
         default: '300'
 
@@ -24,31 +21,49 @@ jobs:
 
       - run: pip install -r requirements.txt
 
+      - name: Determine start page
+        id: determine
+        run: |
+          if [ -n "${{ inputs.reset_start_page }}" ]; then
+            START=${{ inputs.reset_start_page }}
+          elif [ -f state/last_page.txt ]; then
+            LAST=$(cat state/last_page.txt)
+            START=$((LAST + 1))
+          else
+            START=1
+          fi
+          END=$((START + ${{ inputs.chunk_size }} - 1))
+          echo "Starting from page $START to $END"
+          echo "start_page=$START" >> $GITHUB_OUTPUT
+          echo "end_page=$END" >> $GITHUB_OUTPUT
+
       - name: Run spider for this chunk
         run: |
           scrapy crawl pakwheels \
-            -a start_page=${{ inputs.start_page }} \
-            -a end_page=${{ inputs.end_page }} \
-             -s CLOSESPIDER_TIMEOUT=18000 \
-            -o output_${{ inputs.start_page }}_${{ inputs.end_page }}.csv
+            -a start_page=${{ steps.determine.outputs.start_page }} \
+            -a end_page=${{ steps.determine.outputs.end_page }} \
+            -s CLOSESPIDER_TIMEOUT=18000 \
+            -o output_${{ steps.determine.outputs.start_page }}_${{ steps.determine.outputs.end_page }}.csv
 
       - uses: actions/upload-artifact@v4
         with:
-          name: pakwheels-chunk-${{ inputs.start_page }}-${{ inputs.end_page }}
+          name: pakwheels-chunk-${{ steps.determine.outputs.start_page }}-${{ steps.determine.outputs.end_page }}
           path: output_*.csv
 
-      - name: Trigger next chunk
-        if: ${{ inputs.end_page < inputs.total_pages }}
+      - name: Commit updated progress state
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
         run: |
-          NEXT_START=$((${{ inputs.end_page }} + 1))
-          NEXT_END=$((NEXT_START + ${{ inputs.chunk_size }} - 1))
-          if [ "$NEXT_END" -gt "${{ inputs.total_pages }}" ]; then
-            NEXT_END=${{ inputs.total_pages }}
-          fi
-          gh workflow run scrape.yml \
-            -f start_page=$NEXT_START \
-            -f end_page=$NEXT_END \
-            -f total_pages=${{ inputs.total_pages }} \
-            -f chunk_size=${{ inputs.chunk_size }}
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin https://x-access-token:${GH_TOKEN}@github.com/bariraazaib/pakwheels_scraper.git
+          git add state/
+          git diff --cached --quiet || git commit -m "Update scrape progress [skip ci]"
+          git push
+
+      - name: Trigger next chunk
+        if: ${{ !hashFiles('state/done.flag') }}
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          gh workflow run scrape.yml -f chunk_size=${{ inputs.chunk_size }}
