@@ -14,7 +14,7 @@ import re
 from datetime import datetime, timezone
 
 import scrapy
-
+import os
 
 class PakwheelsSpider(scrapy.Spider):
     name = "pakwheels"
@@ -103,7 +103,16 @@ class PakwheelsSpider(scrapy.Spider):
             return None
         slug = m.group(1)
         return " ".join(word.capitalize() for word in slug.split("-"))
-
+        
+    def _write_state(self, last_page, done=False):
+        os.makedirs("state", exist_ok=True)
+        with open("state/last_page.txt", "w") as f:
+            f.write(str(last_page))
+        if done:
+            with open("state/done.flag", "w") as f:
+                f.write("done")
+        self.logger.info(f"State saved: last_page={last_page}, done={done}")
+        
     def parse(self, response):
         page = response.meta["page"]
         self.logger.info(f"Scraping page {page}: {response.url}")
@@ -196,7 +205,10 @@ class PakwheelsSpider(scrapy.Spider):
 
         if items_found == 0:
             self.logger.info("No new listings found, stopping the crawl.")
+            self._write_state(page - 1, done=True)
             return
+
+        self._write_state(page)
 
         if self.end_page and page >= self.end_page:
             self.logger.info(f"Reached end_page={self.end_page}, stopping this chunk.")
